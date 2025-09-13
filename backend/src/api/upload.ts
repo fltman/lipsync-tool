@@ -39,40 +39,72 @@ const upload = multer({
   }
 });
 
-router.post('/', upload.single('video'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No video file provided' });
-    }
-
-    const videoPath = req.file.path;
-    logger.info(`Video uploaded: ${videoPath}`);
-
-    const metadata = await ffmpegService.getVideoMetadata(videoPath);
-    const session = sessionManager.createSession(videoPath, metadata);
-
-    res.json({
-      success: true,
-      sessionId: session.id,
-      metadata: {
-        duration: metadata.duration,
-        resolution: metadata.resolution,
-        framerate: metadata.framerate,
-        codec: metadata.codec,
-        format: metadata.format,
-        size: metadata.size,
-        filename: req.file.originalname
+router.post('/', (req, res, next) => {
+  upload.single('video')(req, res, async (err) => {
+    try {
+      // Handle multer errors
+      if (err) {
+        logger.error('Multer upload error:', err);
+        
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(413).json({ 
+            error: 'File too large',
+            details: 'Maximum file size is 2GB'
+          });
+        }
+        
+        if (err.message && err.message.includes('Unsupported file type')) {
+          return res.status(400).json({ 
+            error: 'Unsupported file type',
+            details: err.message
+          });
+        }
+        
+        return res.status(400).json({ 
+          error: 'Upload failed',
+          details: err.message || 'Unknown upload error'
+        });
       }
-    });
 
-    logger.info(`Session created: ${session.id} for video: ${req.file.originalname}`);
-  } catch (error: any) {
-    logger.error('Upload error:', error.message);
-    res.status(500).json({ 
-      error: 'Failed to process uploaded video',
-      details: error.message 
-    });
-  }
+      if (!req.file) {
+        logger.error('No file received in upload request');
+        return res.status(400).json({ 
+          error: 'No video file provided',
+          details: 'Please select a video file to upload'
+        });
+      }
+
+      const videoPath = req.file.path;
+      logger.info(`Video uploaded successfully: ${videoPath}, size: ${req.file.size} bytes`);
+
+      const metadata = await ffmpegService.getVideoMetadata(videoPath);
+      const session = sessionManager.createSession(videoPath, metadata);
+
+      res.json({
+        success: true,
+        sessionId: session.id,
+        metadata: {
+          duration: metadata.duration,
+          resolution: metadata.resolution,
+          framerate: metadata.framerate,
+          codec: metadata.codec,
+          format: metadata.format,
+          size: metadata.size,
+          filename: req.file.originalname
+        }
+      });
+
+      logger.info(`Session created: ${session.id} for video: ${req.file.originalname}`);
+    } catch (error: any) {
+      logger.error('Upload processing error:', error);
+      logger.error('Error stack:', error.stack);
+      
+      res.status(500).json({ 
+        error: 'Failed to process uploaded video',
+        details: error.message || 'Unknown error occurred'
+      });
+    }
+  });
 });
 
 router.get('/session/:sessionId/video', (req, res) => {

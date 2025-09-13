@@ -285,6 +285,9 @@ async function processSegment(sessionId: string, segmentId: string) {
       progress: 50
     });
 
+    // Calculate estimated duration for timeout
+    const segmentDuration = segment.endTime - segment.startTime;
+    
     await getKlingAIService().processSegment(
       segmentVideoPath,
       segmentAudioPath,
@@ -305,7 +308,8 @@ async function processSegment(sessionId: string, segmentId: string) {
           status: statusEnum,
           progress: 50 + Math.floor(progress * 0.5)
         });
-      }
+      },
+      segmentDuration
     );
 
     sessionManager.updateSegmentPaths(segmentId, {

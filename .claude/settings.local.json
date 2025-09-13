@@ -20,7 +20,14 @@
       "Bash(git commit:*)",
       "Bash(git remote add:*)",
       "Bash(git push:*)",
-      "Bash(git pull:*)"
+      "Bash(git pull:*)",
+      "Bash(ffmpeg:*)",
+      "Bash(grep:*)",
+      "Bash(pgrep:*)",
+      "Bash(/opt/homebrew/bin/ngrok http 3001 --log=stdout)",
+      "WebFetch(domain:6b0b68aee934.ngrok-free.app)",
+      "Bash(/opt/homebrew/bin/ngrok http 3001 --log=stdout --request-header-add 'ngrok-skip-browser-warning:true')",
+      "Bash(docker run:*)"
     ],
     "deny": [],
     "ask": []

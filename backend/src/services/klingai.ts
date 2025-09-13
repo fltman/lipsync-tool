@@ -3,6 +3,7 @@ import FormData from 'form-data';
 import fs from 'fs';
 import path from 'path';
 import { logger } from '../index';
+import { cloudStorage } from './cloudStorage';
 
 export interface KlingAIResponse {
   success: boolean;
@@ -68,72 +69,109 @@ export class KlingAIService {
     const payload = {
       iss: this.accessKey,
       exp: currentTime + 1800, // Valid for 30 minutes
-      nbf: currentTime - 5 // Effective from 5 seconds ago
+      nbf: currentTime - 5, // Effective from 5 seconds ago
+      iat: currentTime // Issued at time
     };
     
-    const headers = {
-      alg: "HS256",
-      typ: "JWT"
-    };
+    const token = jwt.sign(payload, this.secretKey, { 
+      algorithm: 'HS256',
+      noTimestamp: true // Don't add automatic iat
+    });
     
-    return jwt.sign(payload, this.secretKey, { header: headers });
+    logger.info('JWT Token generated:');
+    return token;
   }
 
   async submitLipsyncTask(
     videoPath: string,
     audioPath: string,
     options?: { quality?: string; speed?: number }
-  ): Promise<string> {
+  ): Promise<{ taskId: string; cloudKeys?: string[] }> {
     // Development mode: simulate API without actual calls (only if no credentials)
     if (process.env.NODE_ENV === 'development' && process.env.DISABLE_KLINGAI_API === 'true') {
       logger.info('Development mode: simulating KlingAI task submission');
       const mockTaskId = `mock_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      return mockTaskId;
+      return { taskId: mockTaskId };
     }
 
     try {
       const jwtToken = this.generateJWTToken();
       
-      // Create public URLs for the files
-      const baseUrl = process.env.PUBLIC_BASE_URL || 'http://localhost:3001';
-      const videoUrl = `${baseUrl}/api/files/${path.basename(videoPath)}`;
-      const audioUrl = `${baseUrl}/api/files/${path.basename(audioPath)}`;
+      let videoUrl: string;
+      let audioUrl: string;
+      let cloudKeys: string[] = [];
+      
+      // Check if cloud storage is available
+      if (cloudStorage.isAvailable()) {
+        logger.info('Using cloud storage for file hosting');
+        const uploadResult = await cloudStorage.uploadForProcessing(videoPath, audioPath);
+        videoUrl = uploadResult.videoUrl;
+        audioUrl = uploadResult.audioUrl;
+        cloudKeys = uploadResult.keys;
+        logger.info(`Files uploaded to cloud: video=${videoUrl}, audio=${audioUrl}`);
+      } else {
+        // Fallback to ngrok/local serving if cloud storage not configured
+        logger.warn('Cloud storage not configured, falling back to local serving');
+        const baseUrl = process.env.PUBLIC_BASE_URL || 'http://localhost:3001';
+        const videoFileName = path.basename(videoPath);
+        const audioFileName = path.basename(audioPath);
+        videoUrl = `${baseUrl}/api/files/${videoFileName}`;
+        audioUrl = `${baseUrl}/api/files/${audioFileName}`;
+      }
       
       logger.info(`Submitting lipsync task with video: ${videoUrl}, audio: ${audioUrl}`);
       
-      // Try URL-based approach first  
-      let requestData = {
-        input: {
-          mode: "audio2video", // Audio-to-video generation mode
-          video_url: videoUrl,
-          audio_type: "url", // Using URL to provide audio
-          audio_url: audioUrl,
-          ...(options?.quality && { quality: options.quality }),
-          ...(options?.speed && { speed: options.speed })
-        }
-      };
-
-      logger.info('Request payload:');
-      logger.info(JSON.stringify(requestData, null, 2));
-      logger.info('JWT Token generated:', jwtToken.substring(0, 50) + '...');
-
+      // Check file sizes
+      const videoStats = fs.statSync(videoPath);
+      const audioStats = fs.statSync(audioPath);
+      logger.info(`Video file size: ${videoStats.size} bytes, Audio file size: ${audioStats.size} bytes`);
+      
       let response;
-      try {
-        // Use the correct endpoint from documentation
-        response = await this.client.post('/v1/videos/lip-sync', requestData, {
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${jwtToken}`,
-            'ngrok-skip-browser-warning': 'true'
+      
+      // Try URL-based approach first (preferred when using cloud storage)
+      if (cloudStorage.isAvailable()) {
+        const requestData = {
+          input: {
+            mode: "audio2video",
+            video_url: videoUrl,
+            audio_type: "url",
+            audio_url: audioUrl
           }
-        });
-      } catch (urlError: any) {
-        logger.warn('URL-based request failed, trying file upload approach:', urlError.message);
+        };
         
-        // Fallback to file upload approach
+        if (options?.quality) {
+          (requestData.input as any).quality = options.quality;
+        }
+        if (options?.speed) {
+          (requestData.input as any).speed = options.speed;
+        }
+        
+        logger.info('URL Request payload:', JSON.stringify(requestData, null, 2));
+        
+        try {
+          response = await this.client.post('/v1/videos/lip-sync', requestData, {
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${jwtToken}`
+            }
+          });
+        } catch (urlError: any) {
+          logger.error('URL-based submission failed:', urlError.message);
+          throw urlError;
+        }
+      } else {
+        // Direct file upload approach (fallback for local development)
         const formData = new FormData();
-        formData.append('video', fs.createReadStream(videoPath));
-        formData.append('audio', fs.createReadStream(audioPath));
+        formData.append('video', fs.createReadStream(videoPath), {
+          filename: path.basename(videoPath),
+          contentType: 'video/mp4'
+        });
+        formData.append('audio', fs.createReadStream(audioPath), {
+          filename: path.basename(audioPath),
+          contentType: 'audio/wav'
+        });
+        
+        formData.append('mode', 'audio2video');
         
         if (options?.quality) {
           formData.append('quality', options.quality);
@@ -141,8 +179,9 @@ export class KlingAIService {
         if (options?.speed) {
           formData.append('speed', options.speed.toString());
         }
-
-        // Use the correct endpoint for file upload too
+        
+        logger.info('Using direct file upload approach');
+        
         response = await this.client.post('/v1/videos/lip-sync', formData, {
           headers: {
             ...formData.getHeaders(),
@@ -156,15 +195,14 @@ export class KlingAIService {
       logger.info('API Response received:', JSON.stringify(response?.data, null, 2));
       
       // Handle KlingAI API response format: { code: 0, data: { task_id: "...", ... }, message: "SUCCEED" }
+      let taskId: string;
+      
       if (response && response.data && response.data.code === 0 && response.data.data?.task_id) {
-        logger.info(`Lipsync task submitted: ${response.data.data.task_id}`);
-        return response.data.data.task_id;
+        taskId = response.data.data.task_id;
       } else if (response && response.data && response.data.task_id) {
-        logger.info(`Lipsync task submitted: ${response.data.task_id}`);
-        return response.data.task_id;
+        taskId = response.data.task_id;
       } else if (response && response.data.success && response.data.data?.task_id) {
-        logger.info(`Lipsync task submitted: ${response.data.data.task_id}`);
-        return response.data.data.task_id;
+        taskId = response.data.data.task_id;
       } else {
         logger.error('Unexpected response format:', {
           hasResponse: !!response,
@@ -172,8 +210,15 @@ export class KlingAIService {
           dataKeys: response?.data ? Object.keys(response.data) : 'none',
           fullResponse: response?.data
         });
+        // Clean up cloud files if upload failed
+        if (cloudKeys.length > 0) {
+          await cloudStorage.deleteFiles(cloudKeys);
+        }
         throw new Error(response?.data?.error || 'Failed to submit lipsync task');
       }
+      
+      logger.info(`Lipsync task submitted: ${taskId}`);
+      return { taskId, cloudKeys };
     } catch (error: any) {
       logger.error('Error submitting lipsync task:', {
         message: error.message,
@@ -280,7 +325,10 @@ export class KlingAIService {
         method: 'GET',
         url: resultUrl,
         responseType: 'stream',
-        timeout: 120000
+        timeout: 120000,
+        headers: {
+          'ngrok-skip-browser-warning': 'true'
+        }
       });
 
       const writer = fs.createWriteStream(outputPath);
@@ -305,7 +353,8 @@ export class KlingAIService {
   async pollTaskUntilComplete(
     taskId: string,
     onProgress?: (progress: number, status: string) => void,
-    maxWaitTime: number = 300000 // 5 minutes
+    maxWaitTime: number = 1200000, // 20 minutes for longer clips
+    cloudKeys?: string[] // Cloud storage keys to clean up
   ): Promise<string> {
     const startTime = Date.now();
     
@@ -343,12 +392,18 @@ export class KlingAIService {
             throw new Error(status.task_status_msg || 'Task failed with unknown error');
           
           case 'processing':
+            // Log progress for longer clips
+            logger.info(`Task ${taskId} still processing... (${Math.round((Date.now() - startTime) / 1000)}s elapsed)`);
+            await new Promise(resolve => setTimeout(resolve, 10000)); // Check every 10 seconds for processing
+            break;
+          
           case 'submitted':
+            logger.info(`Task ${taskId} submitted, waiting for processing to start...`);
             await new Promise(resolve => setTimeout(resolve, 5000));
             break;
           
           default:
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            await new Promise(resolve => setTimeout(resolve, 5000));
         }
       } catch (error: any) {
         logger.error(`Error polling task ${taskId}:`, error.message);
@@ -363,31 +418,56 @@ export class KlingAIService {
     videoPath: string,
     audioPath: string,
     outputPath: string,
-    onProgress?: (progress: number, status: string) => void
+    onProgress?: (progress: number, status: string) => void,
+    estimatedDuration?: number // Duration in seconds to estimate timeout
   ): Promise<void> {
+    let cloudKeys: string[] = [];
+    
     try {
       logger.info(`Starting lipsync processing for video: ${videoPath}, audio: ${audioPath}`);
       
-      const taskId = await this.submitLipsyncTask(videoPath, audioPath);
+      const submitResult = await this.submitLipsyncTask(videoPath, audioPath);
+      const taskId = submitResult.taskId;
+      cloudKeys = submitResult.cloudKeys || [];
       
       onProgress?.(10, 'Task submitted, waiting for processing...');
+      
+      // Calculate timeout based on video duration
+      const baseTimeout = 1200000; // 20 minutes base
+      const timeoutMultiplier = parseInt(process.env.KLINGAI_TIMEOUT_MULTIPLIER || '180') * 1000; // Default 3 minutes per second
+      const durationBasedTimeout = estimatedDuration ? Math.max(baseTimeout, estimatedDuration * timeoutMultiplier) : baseTimeout;
+      
+      logger.info(`Using timeout of ${Math.round(durationBasedTimeout / 1000)}s for estimated ${estimatedDuration || 'unknown'}s video duration`);
       
       const resultUrl = await this.pollTaskUntilComplete(
         taskId,
         (progress, status) => {
           onProgress?.(10 + (progress * 0.8), status);
-        }
+        },
+        durationBasedTimeout,
+        cloudKeys
       );
       
       onProgress?.(90, 'Downloading result...');
       
       await this.downloadResult(resultUrl, outputPath);
       
+      // Clean up cloud storage files after successful download
+      if (cloudKeys.length > 0) {
+        await cloudStorage.deleteFiles(cloudKeys);
+      }
+      
       onProgress?.(100, 'Complete');
       
       logger.info(`Lipsync processing completed: ${outputPath}`);
     } catch (error: any) {
       logger.error('Error processing segment:', error.message);
+      
+      // Clean up cloud storage files on error
+      if (cloudKeys.length > 0) {
+        await cloudStorage.deleteFiles(cloudKeys);
+      }
+      
       throw error;
     }
   }

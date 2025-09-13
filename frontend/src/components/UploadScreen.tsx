@@ -16,10 +16,19 @@ const UploadScreen: React.FC<UploadScreenProps> = ({ onUploadSuccess }) => {
   const handleUpload = useCallback(async (file: File) => {
     if (!file) return;
 
+    console.log('Starting upload for file:', file.name, 'type:', file.type, 'size:', file.size);
+
     const allowedTypes = ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska', 'video/webm'];
-    if (!allowedTypes.includes(file.type)) {
-      setError('Unsupported file type. Please upload MP4, MOV, AVI, MKV, or WebM files.');
-      return;
+    // Also check for empty type and rely on file extension
+    const fileExtension = file.name.split('.').pop()?.toLowerCase();
+    const allowedExtensions = ['mp4', 'mov', 'avi', 'mkv', 'webm'];
+    
+    if (file.type && !allowedTypes.includes(file.type)) {
+      console.warn('File type not in allowed list:', file.type);
+      if (!fileExtension || !allowedExtensions.includes(fileExtension)) {
+        setError('Unsupported file type. Please upload MP4, MOV, AVI, MKV, or WebM files.');
+        return;
+      }
     }
 
     const maxSize = 2 * 1024 * 1024 * 1024; // 2GB
@@ -33,7 +42,13 @@ const UploadScreen: React.FC<UploadScreenProps> = ({ onUploadSuccess }) => {
     setError(null);
 
     try {
-      const response = await apiService.uploadVideo(file);
+      console.log('Uploading file to server...');
+      const response = await apiService.uploadVideo(file, (progressEvent) => {
+        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+        setUploadProgress(percentCompleted);
+        console.log('Upload progress:', percentCompleted + '%');
+      });
+      console.log('Upload successful:', response);
       
       const session: Session = {
         id: response.sessionId,
@@ -43,7 +58,14 @@ const UploadScreen: React.FC<UploadScreenProps> = ({ onUploadSuccess }) => {
       onUploadSuccess(session);
     } catch (err: any) {
       console.error('Upload error:', err);
-      setError(err.response?.data?.error || 'Failed to upload video. Please try again.');
+      console.error('Error response:', err.response);
+      
+      const errorMessage = err.response?.data?.details || 
+                          err.response?.data?.error || 
+                          err.message ||
+                          'Failed to upload video. Please try again.';
+      
+      setError(errorMessage);
     } finally {
       setIsUploading(false);
       setUploadProgress(0);

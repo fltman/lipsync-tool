@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npm run dev:*)",
+      "Bash(npm run build:*)",
+      "Bash(node:*)",
+      "Read(//Users/andersbj/Projekt/lipsynctool/frontend/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

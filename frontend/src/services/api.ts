@@ -5,7 +5,7 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api'
 
 const api = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30000,
+  timeout: 300000, // 5 minutes for large file uploads
 });
 
 export interface UploadResponse {
@@ -36,7 +36,7 @@ export interface QueueStatusResponse {
 
 export const apiService = {
   // Upload API
-  async uploadVideo(file: File): Promise<UploadResponse> {
+  async uploadVideo(file: File, onUploadProgress?: (progressEvent: any) => void): Promise<UploadResponse> {
     const formData = new FormData();
     formData.append('video', file);
     
@@ -44,6 +44,8 @@ export const apiService = {
       headers: {
         'Content-Type': 'multipart/form-data',
       },
+      onUploadProgress: onUploadProgress,
+      timeout: 600000, // 10 minutes for upload specifically
     });
     
     return response.data;
